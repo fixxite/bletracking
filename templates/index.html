@@ -343,8 +343,14 @@ async function refresh() {
     const data = await r.json();
 
     buildTrackingGrid(data.gateways);
-    buildNamingPanel(data.all_gateways, 'gw-naming', 'gateway');
-    buildNamingPanel(data.all_tags, 'tag-naming', 'tag');
+
+    // Don't rebuild naming panels while user is typing in one
+    const namingFocused = document.activeElement &&
+      document.activeElement.closest('#naming-section');
+    if (!namingFocused) {
+      buildNamingPanel(data.all_gateways, 'gw-naming', 'gateway');
+      buildNamingPanel(data.all_tags, 'tag-naming', 'tag');
+    }
 
     const total = data.gateways.reduce((s, g) => s + g.tags.length, 0);
     document.getElementById('status-text').textContent =
