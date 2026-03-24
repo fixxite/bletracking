@@ -209,6 +209,26 @@
     }
 
     .empty-msg { color: #475569; font-size: 0.82rem; font-style: italic; }
+
+    .setting-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      font-size: 0.78rem;
+      color: #94a3b8;
+    }
+
+    .setting-field input {
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      border-radius: 0.375rem;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.82rem;
+      outline: none;
+    }
+
+    .setting-field input:focus { border-color: #38bdf8; }
   </style>
 </head>
 <body>
@@ -223,6 +243,36 @@
 
   <h2>Live View</h2>
   <div id="tracking-grid"><p class="empty-msg">Waiting for gateway data&hellip;</p></div>
+
+  <h2>MQTT Settings</h2>
+  <div class="naming-panel" id="settings-panel" style="margin-bottom:1.5rem">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.75rem" id="settings-fields">
+      <label class="setting-field">
+        <span>Broker host</span>
+        <input type="text" id="cfg-host" placeholder="localhost">
+      </label>
+      <label class="setting-field">
+        <span>Port</span>
+        <input type="number" id="cfg-port" placeholder="1883" min="1" max="65535">
+      </label>
+      <label class="setting-field">
+        <span>Topic prefix</span>
+        <input type="text" id="cfg-prefix" placeholder="gw">
+      </label>
+      <label class="setting-field">
+        <span>Username</span>
+        <input type="text" id="cfg-user" placeholder="(none)">
+      </label>
+      <label class="setting-field">
+        <span>Password</span>
+        <input type="password" id="cfg-pass" placeholder="(unchanged)">
+      </label>
+    </div>
+    <div style="margin-top:0.75rem;display:flex;align-items:center;gap:0.75rem">
+      <button onclick="saveSettings()">Apply &amp; Reconnect</button>
+      <span id="settings-feedback" style="font-size:0.8rem;color:#4ade80"></span>
+    </div>
+  </div>
 
   <h2>Name Gateways &amp; Tags</h2>
   <div id="naming-section">
@@ -360,6 +410,46 @@ async function refresh() {
   }
 }
 
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    const s = await r.json();
+    document.getElementById('cfg-host').value   = s.mqtt_host;
+    document.getElementById('cfg-port').value   = s.mqtt_port;
+    document.getElementById('cfg-prefix').value = s.topic_prefix;
+    document.getElementById('cfg-user').value   = s.mqtt_user;
+    // leave password blank — placeholder indicates if one is set
+    document.getElementById('cfg-pass').placeholder = s.mqtt_pass_set ? '(set — leave blank to keep)' : '(none)';
+  } catch { /* ignore */ }
+}
+
+async function saveSettings() {
+  const body = {
+    mqtt_host:    document.getElementById('cfg-host').value.trim(),
+    mqtt_port:    document.getElementById('cfg-port').value.trim(),
+    topic_prefix: document.getElementById('cfg-prefix').value.trim(),
+    mqtt_user:    document.getElementById('cfg-user').value.trim(),
+  };
+  const pass = document.getElementById('cfg-pass').value;
+  if (pass) body.mqtt_pass = pass;
+
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const fb = document.getElementById('settings-feedback');
+    if (r.ok) {
+      fb.textContent = 'Saved — reconnecting…';
+      setTimeout(() => { fb.textContent = ''; loadSettings(); }, 2000);
+    } else {
+      fb.textContent = 'Error saving settings';
+    }
+  } catch { /* ignore */ }
+}
+
+loadSettings();
 refresh();
 setInterval(refresh, REFRESH_MS);
 </script>

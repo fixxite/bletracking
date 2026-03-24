@@ -10,14 +10,25 @@ from flask import Flask, jsonify, render_template, request
 import db
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Defaults (overridden by DB settings, which override env vars)
 # ---------------------------------------------------------------------------
-MQTT_HOST     = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT     = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER     = os.getenv("MQTT_USER", "")
-MQTT_PASS     = os.getenv("MQTT_PASS", "")
-TOPIC_PREFIX  = os.getenv("TOPIC_PREFIX", "gw")   # subscribes to <prefix>/+/status
+_DEFAULTS = {
+    "mqtt_host":     os.getenv("MQTT_HOST", "localhost"),
+    "mqtt_port":     os.getenv("MQTT_PORT", "1883"),
+    "mqtt_user":     os.getenv("MQTT_USER", ""),
+    "mqtt_pass":     os.getenv("MQTT_PASS", ""),
+    "topic_prefix":  os.getenv("TOPIC_PREFIX", "gw"),
+}
 STALE_SECONDS = int(os.getenv("STALE_SECONDS", "30"))
+
+
+def get_cfg():
+    """Return current MQTT config, merging DB values over defaults."""
+    cfg = dict(_DEFAULTS)
+    cfg.update(db.all_settings())
+    cfg["mqtt_port"] = int(cfg["mqtt_port"])
+    return cfg
+
 
 # ---------------------------------------------------------------------------
 # In-memory state
@@ -28,22 +39,25 @@ seen_gateways: set = set()
 seen_tags: set = set()
 state_lock = threading.Lock()
 
+mqtt_client = None
+mqtt_lock = threading.Lock()
+
 # ---------------------------------------------------------------------------
-# MQTT callbacks
+# MQTT
 # ---------------------------------------------------------------------------
 
-def on_connect(client, userdata, flags, reason_code, properties=None):
-    # Subscribe both with and without leading slash
-    topic = f"{TOPIC_PREFIX}/+/status"
-    client.subscribe(topic)
-    client.subscribe(f"/{topic}")
-    print(f"[MQTT] Connected, subscribed to {topic} and /{topic}")
+def _make_on_connect(topic_prefix):
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        topic = f"{topic_prefix}/+/status"
+        client.subscribe(topic)
+        client.subscribe(f"/{topic}")
+        print(f"[MQTT] Connected, subscribed to {topic} and /{topic}")
+    return on_connect
 
 
 def on_message(client, userdata, msg):
     try:
         parts = msg.topic.strip("/").split("/")
-        # Expect <prefix>/<gateway_mac>/status
         if len(parts) < 2:
             return
         gateway_mac = parts[-2].upper()
@@ -77,15 +91,29 @@ def on_message(client, userdata, msg):
         print(f"[MQTT] Error processing message: {exc}")
 
 
-def start_mqtt():
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    if MQTT_USER:
-        client.username_pw_set(MQTT_USER, MQTT_PASS)
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.connect_async(MQTT_HOST, MQTT_PORT)
-    client.loop_start()
-    return client
+def start_mqtt(cfg=None):
+    global mqtt_client
+    if cfg is None:
+        cfg = get_cfg()
+
+    with mqtt_lock:
+        if mqtt_client is not None:
+            try:
+                mqtt_client.loop_stop()
+                mqtt_client.disconnect()
+            except Exception:
+                pass
+
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        if cfg["mqtt_user"]:
+            client.username_pw_set(cfg["mqtt_user"], cfg["mqtt_pass"])
+        client.on_connect = _make_on_connect(cfg["topic_prefix"])
+        client.on_message = on_message
+        client.connect_async(cfg["mqtt_host"], cfg["mqtt_port"])
+        client.loop_start()
+        mqtt_client = client
+        print(f"[MQTT] Connecting to {cfg['mqtt_host']}:{cfg['mqtt_port']} "
+              f"topic={cfg['topic_prefix']}/+/status")
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +123,6 @@ app = Flask(__name__)
 
 
 def _format_mac(mac: str) -> str:
-    """Format a 12-char MAC string as XX:XX:XX:XX:XX:XX."""
     mac = mac.upper().replace(":", "")
     return ":".join(mac[i:i+2] for i in range(0, 12, 2)) if len(mac) == 12 else mac
 
@@ -105,9 +132,33 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/settings", methods=["GET"])
+def api_get_settings():
+    cfg = get_cfg()
+    # Never send password back in plaintext; send a placeholder if set
+    return jsonify(
+        mqtt_host=cfg["mqtt_host"],
+        mqtt_port=cfg["mqtt_port"],
+        mqtt_user=cfg["mqtt_user"],
+        mqtt_pass_set=bool(cfg["mqtt_pass"]),
+        topic_prefix=cfg["topic_prefix"],
+    )
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_set_settings():
+    data = request.json or {}
+    fields = ["mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass", "topic_prefix"]
+    for field in fields:
+        if field in data and str(data[field]).strip():
+            db.set_setting(field, str(data[field]).strip())
+    # Reconnect with new settings
+    start_mqtt()
+    return jsonify(ok=True)
+
+
 @app.route("/api/data")
 def api_data():
-    cutoff = time.time() - STALE_SECONDS
     now_ts = time.time()
 
     with state_lock:
@@ -123,11 +174,9 @@ def api_data():
         tags_raw = gw_snapshot.get(gw_mac, {})
         tags_out = []
         for tag_mac, info in tags_raw.items():
-            # Filter stale
             try:
                 ls = datetime.fromisoformat(info["last_seen"])
-                age = now_ts - ls.timestamp()
-                if age > STALE_SECONDS:
+                if now_ts - ls.timestamp() > STALE_SECONDS:
                     continue
             except Exception:
                 pass
@@ -143,7 +192,6 @@ def api_data():
             })
 
         tags_out.sort(key=lambda t: t["rssi"], reverse=True)
-
         gateways_out.append({
             "mac":     _format_mac(gw_mac),
             "mac_raw": gw_mac,

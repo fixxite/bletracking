@@ -23,9 +23,34 @@ def init_db():
             mac  TEXT PRIMARY KEY,
             name TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
+
+
+def get_setting(key, default=""):
+    row = _conn().execute(
+        "SELECT value FROM settings WHERE key = ?", (key,)
+    ).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    _conn().execute(
+        "INSERT INTO settings(key, value) VALUES(?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+    _conn().commit()
+
+
+def all_settings():
+    rows = _conn().execute("SELECT key, value FROM settings").fetchall()
+    return {r["key"]: r["value"] for r in rows}
 
 
 def get_name(table, mac):
